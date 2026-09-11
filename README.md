@@ -26,3 +26,4 @@ PWA mobile/desktop qui découpe une vidéo en MP4 de **120 000 000 octets maximu
 - Le découpage rapide utilise `-c copy`, idéal pour les MP4/MOV habituels de téléphone.
 - Chaque Function produit une partie d'environ 108 Mo cible et vérifie qu'elle reste <= 120 000 000 octets.
 - Sur les plans avec une durée de Function limitée, une partie doit finir avant le timeout du plan.
+- trigger deploy
