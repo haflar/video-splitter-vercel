@@ -1,4 +1,4 @@
-import { upload } from '@vercel/blob/client';
+import { uploadPresigned } from '@vercel/blob/client';
 import './style.css';
 
 const MAX_BYTES = 120_000_000;
@@ -132,7 +132,7 @@ async function startSplit() {
   try {
     setStatus(`<div class="progressText"><b>Envoi de la vidéo…</b><span id="pct">0%</span></div><div class="bar"><i id="bar"></i></div>`);
     const safeName = selectedFile.name.replace(/[^a-zA-Z0-9._-]/g, '_');
-    const source = await upload(`uploads/${Date.now()}-${safeName}`, selectedFile, {
+    const source = await uploadPresigned(`uploads/${Date.now()}-${safeName}`, selectedFile, {
       access: 'private',
       handleUploadUrl: '/api/upload',
       clientPayload: JSON.stringify({ password }),
