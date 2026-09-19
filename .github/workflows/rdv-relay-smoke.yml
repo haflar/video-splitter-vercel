@@ -31,7 +31,7 @@ jobs:
           p='/tmp/status.json'
           d=json.load(open(p,encoding='utf-8'))
           assert d.get('ok') is True, d
-          assert d.get('mode') == 'pinned-public-relay', d
+          assert d.get('mode') == 'pinned-public-relay-live', d
           assert d.get('serviceId') == 29, d
           assert d.get('sourceUrl','').startswith('https://www.consulatalgeriemontreal.com/rendez-vous/index.php'), d
           assert isinstance(d.get('slots'), list), d
