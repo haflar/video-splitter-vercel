@@ -20,7 +20,11 @@ jobs:
         run: |
           set -euo pipefail
           URL="https://video-splitter-vercel.vercel.app/api/rdv-status?months=4"
-          curl --fail --show-error --silent --max-time 60 "$URL" -o /tmp/status.json
+          code=$(curl --show-error --silent --max-time 60 "$URL" -o /tmp/status.json -w '%{http_code}')
+          echo "HTTP=$code"
+          cat /tmp/status.json
+          echo
+          test "$code" = "200"
           python - <<'PY'
           import json
           p='/tmp/status.json'
