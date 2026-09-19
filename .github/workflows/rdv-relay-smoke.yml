@@ -1,0 +1,43 @@
+name: RDV relay smoke test
+
+on:
+  push:
+    branches: [ main ]
+    paths:
+      - '.github/workflows/rdv-relay-smoke.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    steps:
+      - name: Check public relay endpoint
+        shell: bash
+        run: |
+          set -euo pipefail
+          URL="https://video-splitter-vercel.vercel.app/api/rdv-status?months=4"
+          curl --fail --show-error --silent --max-time 60 "$URL" -o /tmp/status.json
+          python - <<'PY'
+          import json
+          p='/tmp/status.json'
+          d=json.load(open(p,encoding='utf-8'))
+          assert d.get('ok') is True, d
+          assert d.get('mode') == 'pinned-public-relay', d
+          assert d.get('serviceId') == 29, d
+          assert d.get('sourceUrl','').startswith('https://www.consulatalgeriemontreal.com/rendez-vous/index.php'), d
+          assert isinstance(d.get('slots'), list), d
+          print(json.dumps({
+              'ok': d['ok'],
+              'mode': d['mode'],
+              'verifiedAt': d.get('verifiedAt'),
+              'monthsChecked': d.get('monthsChecked'),
+              'datesDetected': d.get('datesDetected'),
+              'totalPlaces': d.get('totalPlaces'),
+              'sourceUrl': d.get('sourceUrl'),
+              'certificateIssuer': (d.get('certificate') or {}).get('issuer')
+          }, ensure_ascii=False, indent=2))
+          PY
