@@ -1,0 +1,219 @@
+name: RDV Passport availability relay
+
+on:
+  schedule:
+    - cron: '*/5 * * * *'
+  workflow_dispatch:
+  push:
+    branches: [ main ]
+    paths:
+      - '.github/workflows/rdv-availability-relay.yml'
+
+permissions:
+  contents: write
+
+concurrency:
+  group: rdv-availability-relay
+  cancel-in-progress: true
+
+jobs:
+  refresh:
+    runs-on: ubuntu-latest
+    timeout-minutes: 4
+    steps:
+      - name: Checkout relay repository
+        uses: actions/checkout@v6
+
+      - name: Read official passport calendar with pinned public key
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import datetime as dt
+          import html as htmlmod
+          import json
+          import re
+          import subprocess
+          import urllib.parse
+
+          HOSTS = {"www.consulatalgeriemontreal.com", "consulatalgeriemontreal.com"}
+          HOST = "www.consulatalgeriemontreal.com"
+          PATH = "/rendez-vous/index.php"
+          SERVICE_ID = "29"
+          PIN_B64 = "to8ZIWYsU32EfJhdKhSi0jNtyNKHCwIIz3vW/vMd7EE="
+          CURL_PIN = "sha256//" + PIN_B64
+          MONTHS = 4
+
+          def allowed_calendar(url):
+              try:
+                  u = urllib.parse.urlsplit(url)
+                  q = urllib.parse.parse_qs(u.query)
+                  return (
+                      u.scheme == "https"
+                      and u.hostname in HOSTS
+                      and u.path == PATH
+                      and q.get("serviceID", [""])[0] == SERVICE_ID
+                  )
+              except Exception:
+                  return False
+
+          def allowed_target(url):
+              try:
+                  u = urllib.parse.urlsplit(url)
+                  q = urllib.parse.parse_qs(u.query)
+                  if u.scheme != "https" or u.hostname not in HOSTS:
+                      return False
+                  if u.path not in ("/rendez-vous/index.php", "/rendez-vous/booking.php"):
+                      return False
+                  return q.get("serviceID", [""])[0] == SERVICE_ID
+              except Exception:
+                  return False
+
+          def strip_tags(s):
+              s = re.sub(r"<[^>]*>", " ", s, flags=re.S)
+              return re.sub(r"\s+", " ", htmlmod.unescape(s)).strip()
+
+          def normalize(s):
+              import unicodedata
+              return "".join(
+                  ch for ch in unicodedata.normalize("NFD", s)
+                  if unicodedata.category(ch) != "Mn"
+              ).lower()
+
+          def month_add(year, month, delta):
+              x = (year * 12 + (month - 1)) + delta
+              return x // 12, x % 12 + 1
+
+          now_mtl = dt.datetime.now(dt.timezone(dt.timedelta(hours=-4)))
+          year0, month0 = now_mtl.year, now_mtl.month
+          slots = []
+          checked = []
+          source_url = ""
+
+          try:
+              for i in range(MONTHS):
+                  year, month = month_add(year0, month0, i)
+                  mm = f"{month:02d}"
+                  url = f"https://{HOST}{PATH}?month={mm}&serviceID={SERVICE_ID}&year={year}"
+                  out = f"/tmp/rdv-{year}-{mm}.html"
+
+                  proc = subprocess.run(
+                      [
+                          "curl", "-k", "--pinnedpubkey", CURL_PIN,
+                          "--proto", "=https", "--proto-redir", "=https",
+                          "-L", "--max-redirs", "3",
+                          "--connect-timeout", "15", "--max-time", "30",
+                          "-A", "RDV-Passeport-Montreal/public-relay-1.0",
+                          "-H", "Accept: text/html,application/xhtml+xml",
+                          "-H", "Accept-Language: fr-CA,fr;q=0.9,en;q=0.4",
+                          "-o", out,
+                          "-sS", "-w", "%{http_code}|%{url_effective}",
+                          url,
+                      ],
+                      text=True,
+                      capture_output=True,
+                      check=False,
+                  )
+                  meta = proc.stdout.strip().split("|", 1)
+                  if proc.returncode != 0 or len(meta) != 2:
+                      raise RuntimeError("Connexion au calendrier officiel impossible: " + proc.stderr.strip())
+                  code, final_url = meta
+                  if code != "200":
+                      raise RuntimeError("Calendrier officiel HTTP " + code)
+                  if not allowed_calendar(final_url):
+                      raise RuntimeError("Redirection du calendrier hors source officielle")
+
+                  body = open(out, encoding="utf-8", errors="replace").read()
+                  text = normalize(strip_tags(body))
+                  if len(body) < 500 or "passeport" not in text or "rendez-vous" not in text or "<td" not in body.lower():
+                      raise RuntimeError("Page reçue non reconnue comme calendrier Passeport")
+
+                  checked.append(f"{mm}/{year}")
+                  if not source_url:
+                      source_url = final_url
+
+                  for cell in re.findall(r"<td\b[\s\S]*?</td>", body, flags=re.I):
+                      cell_text = strip_tags(cell)
+                      cm = re.search(r"(\d+)\s*place(?:\(s\)|s)?\s*disponible(?:\(s\)|s)?", cell_text, flags=re.I)
+                      if not cm:
+                          continue
+                      count = int(cm.group(1))
+                      if count <= 0:
+                          continue
+                      before = cell_text[:cm.start()]
+                      days = re.findall(r"(?<!\d)([1-9]|[12]\d|3[01])(?!\d)", before)
+                      if not days:
+                          continue
+                      day = int(days[-1])
+
+                      target = final_url
+                      for href in re.findall(r"href\s*=\s*[\"']([^\"']+)[\"']", cell, flags=re.I):
+                          absolute = urllib.parse.urljoin(final_url, htmlmod.unescape(href))
+                          if allowed_target(absolute):
+                              target = absolute
+                              if urllib.parse.urlsplit(absolute).path.endswith("/booking.php"):
+                                  break
+
+                      dt.date(year, month, day)
+                      slots.append({
+                          "year": year,
+                          "month": month,
+                          "day": day,
+                          "count": count,
+                          "bookingUrl": target,
+                      })
+
+              total = sum(s["count"] for s in slots)
+              payload = {
+                  "ok": True,
+                  "mode": "pinned-public-relay",
+                  "serviceId": 29,
+                  "serviceLabel": "Passeport — première demande / renouvellement",
+                  "verifiedAt": dt.datetime.now(dt.timezone.utc).isoformat().replace("+00:00", "Z"),
+                  "monthsChecked": ", ".join(checked),
+                  "datesDetected": len(slots),
+                  "totalPlaces": total,
+                  "sourceUrl": source_url,
+                  "certificate": {
+                      "issuer": "Sectigo Public Server Authentication CA OV R36",
+                      "spkiSha256": PIN_B64,
+                  },
+                  "slots": slots,
+              }
+          except Exception as exc:
+              payload = {
+                  "ok": False,
+                  "mode": "pinned-public-relay",
+                  "serviceId": 29,
+                  "verifiedAt": dt.datetime.now(dt.timezone.utc).isoformat().replace("+00:00", "Z"),
+                  "error": str(exc),
+                  "slots": [],
+              }
+
+          with open("/tmp/status.json", "w", encoding="utf-8") as f:
+              json.dump(payload, f, ensure_ascii=False, separators=(",", ":"))
+              f.write("\n")
+
+          print(json.dumps({
+              "ok": payload.get("ok"),
+              "verifiedAt": payload.get("verifiedAt"),
+              "monthsChecked": payload.get("monthsChecked"),
+              "datesDetected": payload.get("datesDetected"),
+              "totalPlaces": payload.get("totalPlaces"),
+              "error": payload.get("error"),
+          }, ensure_ascii=False))
+          PY
+
+      - name: Publish only anonymous availability to rdv-status branch
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git checkout --orphan rdv-status-tmp
+          git rm -rf . >/dev/null 2>&1 || true
+          cp /tmp/status.json status.json
+          printf '%s\n' "This branch contains only anonymous public appointment availability." > README.md
+          git add status.json README.md
+          git commit -m "Refresh RDV availability"
+          git push --force origin HEAD:rdv-status
